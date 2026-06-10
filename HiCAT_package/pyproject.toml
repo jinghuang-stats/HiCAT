@@ -11,9 +11,9 @@ license = { text = "MIT" }
 keywords = [
     "multimodal spatial omics",
     "spatial transcriptomics",
-    "pathologist annotation"
+    "pathologist annotation",
     "label transfer",
-    "intra-sample heterogeneity"
+    "intra-sample heterogeneity",
     "hierarchical annotation"
 ]
 classifiers = [
