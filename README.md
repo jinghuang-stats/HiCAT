@@ -9,7 +9,7 @@ HiCAT is a supervised computational framework for generating pathologist-informe
 
 ![HiCAT workflow](figures/HiCAT_workflow_most_upd.png)
 <br>
-For a detailed description of the method and analyses, please see our preprint: [Biorxiv]()
+For a detailed description of the method and analyses, please see our preprint: [Biorxiv](https://www.biorxiv.org/content/10.64898/2026.05.27.728266v1)
 <br>
 
 ## Key features
