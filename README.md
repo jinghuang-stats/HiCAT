@@ -32,18 +32,16 @@ Users are also welcome to provide their own annotated spatial reference datasets
 ### Step-by-step guides
 
 - [Tutorial Markdown](https://github.com/jinghuang-stats/HiCAT/blob/main/tutorial/tutorial.md)
-- [Tutorial Notebook](https://github.com/jinghuang-stats/HiCAT/blob/main/tutorial/tutorial.ipynb)
 
 To open and run the notebook locally, please install Jupyter or use another `.ipynb`-compatible environment such as VS Code.
 
 ### Data and reference files
 
-- Toy data: [download here]()
-- Precomputated reference information:
-  - [breast cancer]()
-  - [human tonsil]()
-  - [mouse brain]()
-
+| Dataset | Description | Data link | Annotation labels | Precomputed reference information
+|---|---|---|---|---|
+| Toy data | Example toy dataset for running the tutorial  | [download data](https://drive.google.com/drive/folders/1BaqScSe3mxz7JGlixYd-4SSmzHZBOoVb?usp=sharing) | - | - |
+| Breast cancer | Breast cancer Spatial Transcriptomics Data | [download data](https://zenodo.org/records/3957257#.Y4LB-rLMIfg) | [download labels](https://drive.google.com/drive/folders/1dvCbkgciSRbCc7SAMad0dBVa2tEQtMI-?usp=sharing) | [download file](https://drive.google.com/drive/folders/1dvCbkgciSRbCc7SAMad0dBVa2tEQtMI-?usp=sharing) |
+| Mouse brain | Mouse brain 10x Visium data | [download data](https://www.10xgenomics.com/datasets/multiomic-integration-neuroscience-application-note-visium-for-ffpe-plus-immunofluorescence-alzheimers-disease-mouse-model-brain-coronal-sections-from-one-hemisphere-over-a-time-course-1-standard) | [download labels](https://drive.google.com/drive/folders/1TEf7n1TLaxQNpNHBCWbxcRIKWuas6Wd5?usp=sharing) | [download file](https://drive.google.com/drive/folders/1TEf7n1TLaxQNpNHBCWbxcRIKWuas6Wd5?usp=sharing) | 
 
 ## System requirements
 HiCAT requies Python and the following core Python packages: 
