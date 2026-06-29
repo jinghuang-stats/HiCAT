@@ -3,10 +3,199 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from scipy.sparse import issparse
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
 
 # Local package imports
 from .preprocess import *
 from .util import *
+
+
+#=======================================================================
+# Reference selection result objects
+#=======================================================================
+@dataclass
+class ReferenceSelectionResult:
+    """
+    Result object for query-specific reference selection.
+
+    This dataclass stores reference similarity scores, ranked references,
+    selected references, selection summaries, and the parameters used for
+    reference selection.
+
+    Attributes
+    ----------
+    selected_refs_dic : dict
+        Dictionary mapping each query section to selected reference sections.
+
+        Example
+        -------
+        selected_refs_dic["H2"] = ["H1", "G2"]
+
+    similarity_summary_dic : dict
+        Dictionary mapping each query section to a DataFrame containing
+        reference-level similarity scores.
+
+        Each DataFrame is indexed by reference section and usually contains:
+            - raw similarity score, e.g. "KS_similarity"
+            - reference weight, e.g. "weight"
+            - weighted similarity score, e.g. "weighted_KS_similarity"
+
+    selection_summary_dic : dict
+        Dictionary mapping each query section to a DataFrame containing
+        similarity scores and selection indicators.
+
+        Each DataFrame usually contains:
+            - similarity scores
+            - selection score
+            - whether each reference is above the minimum similarity level
+            - whether each reference is selected by the main rule
+            - final selected indicator
+            - selection cutoff
+            - max score
+            - minimum similarity level
+
+    ranked_refs_dic : dict
+        Dictionary mapping each query section to ranked reference sections.
+
+        Example
+        -------
+        ranked_refs_dic["H2"] = ["H1", "G2", "E1"]
+
+    weights : pandas.DataFrame, optional
+        Reference-section weights used to compute weighted similarity scores.
+
+    region_dic : dict, optional
+        Dictionary mapping each reference section to valid tissue regions used
+        for reference-weight calculation.
+
+    selection_metric : str
+        Score column used for final reference selection.
+
+        Example
+        -------
+        "weighted_KS_similarity"
+
+    selection_mode : str
+        Reference selection mode.
+
+        Usually one of:
+            - "cutoff"
+            - "top_k"
+
+    selection_cutoffs : dict
+        Dictionary recording parameter cutoffs used for selection.
+
+        Example
+        -------
+        {
+            "alpha": 0.9,
+            "top_k": 3,
+            "min_similarity_level": 0.7
+        }
+
+    params : dict
+        Full pipeline parameters.
+
+    d_s_All : dict, optional
+        Nested dictionary containing gene-level query-reference similarity
+        results.
+
+    gene_list_All : dict, optional
+        Marker genes used for each reference section.
+
+    d_g_All : dict, optional
+        Full marker-gene selection results.
+
+    ref_adata_dic : dict, optional
+        Processed reference AnnData dictionary.
+
+    qry_adata_dic : dict, optional
+        Processed query AnnData dictionary.
+    """
+
+    selected_refs_dic: Dict[str, List[str]]
+    similarity_summary_dic: Dict[str, pd.DataFrame]
+    selection_summary_dic: Dict[str, pd.DataFrame]
+    ranked_refs_dic: Dict[str, List[str]]
+
+    selection_metric: str
+    selection_mode: str
+    selection_cutoffs: Dict[str, Any]
+
+    weights: Optional[pd.DataFrame] = None
+    region_dic: Optional[Dict[str, List[str]]] = None
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    d_s_All: Optional[Dict[str, Dict[str, pd.DataFrame]]] = None
+    gene_list_All: Optional[Dict[str, List[str]]] = None
+    d_g_All: Optional[Dict[str, Any]] = None
+
+    ref_adata_dic: Optional[Dict[str, Any]] = None
+    qry_adata_dic: Optional[Dict[str, Any]] = None
+
+    def get_selected_refs(self, query_section: str) -> List[str]:
+        """Return selected reference sections for one query section."""
+        if query_section not in self.selected_refs_dic:
+            raise KeyError(
+                f"{query_section!r} is not found in selected_refs_dic."
+            )
+        return self.selected_refs_dic[query_section]
+
+    def get_similarity_summary(self, query_section: str) -> pd.DataFrame:
+        """Return reference similarity summary for one query section."""
+        if query_section not in self.similarity_summary_dic:
+            raise KeyError(
+                f"{query_section!r} is not found in similarity_summary_dic."
+            )
+        return self.similarity_summary_dic[query_section]
+
+    def get_selection_summary(self, query_section: str) -> pd.DataFrame:
+        """Return selection summary for one query section."""
+        if query_section not in self.selection_summary_dic:
+            raise KeyError(
+                f"{query_section!r} is not found in selection_summary_dic."
+            )
+        return self.selection_summary_dic[query_section]
+
+    def get_ranked_refs(self, query_section: str) -> List[str]:
+        """Return ranked reference sections for one query section."""
+        if query_section not in self.ranked_refs_dic:
+            raise KeyError(
+                f"{query_section!r} is not found in ranked_refs_dic."
+            )
+        return self.ranked_refs_dic[query_section]
+
+    def to_summary_df(self) -> pd.DataFrame:
+        """
+        Create a compact query-level summary table.
+
+        Returns
+        -------
+        summary_df : pandas.DataFrame
+            One-row-per-query summary with selected references, ranked references,
+            selection metric, selection mode, and cutoff parameters.
+        """
+
+        rows = []
+
+        for query_section in self.selected_refs_dic:
+            selected_refs = self.selected_refs_dic[query_section]
+            ranked_refs = self.ranked_refs_dic.get(query_section, [])
+
+            rows.append(
+                {
+                    "query_section": query_section,
+                    "selected_refs": selected_refs,
+                    "n_selected_refs": len(selected_refs),
+                    "ranked_refs": ranked_refs,
+                    "selection_metric": self.selection_metric,
+                    "selection_mode": self.selection_mode,
+                    **self.selection_cutoffs,
+                }
+            )
+
+        return pd.DataFrame(rows).set_index("query_section")
 
 
 # ============================================================
@@ -788,22 +977,42 @@ def select_references_pipeline(
         "preprocess_qry": preprocess_qry,
     }
 
-    results_dic = {
-        "ref_adata_dic": ref_adata_dic,
-        "qry_adata_dic": qry_adata_dic,
-        "weights": weights,
-        "region_dic": region_dic,
-        "d_g_All": d_g_All,
-        "gene_list_All": gene_list_All,
-        "d_s_All": d_s_All,
-        "similarity_summary_dic": similarity_summary_dic,
-        "ranked_refs_dic": ranked_refs_dic,
-        "selected_refs_dic": selected_refs_dic,
-        "selection_summary_dic": selection_summary_dic,
-        "params": params,
-    }
+	if selection_score_key is None:
+	    if sort_by == "weighted":
+	        final_selection_metric = weighted_similarity_key
+	    elif sort_by == "similarity":
+	        final_selection_metric = similarity_key
+	else:
+	    final_selection_metric = selection_score_key	
+	
 
-    return results_dic
+	selection_cutoffs = {
+	    "alpha": alpha,
+	    "top_k": top_k,
+	    "min_similarity_level": min_similarity_level,
+	}	
+	
+
+	result = ReferenceSelectionResult(
+	    selected_refs_dic=selected_refs_dic,
+	    similarity_summary_dic=similarity_summary_dic,
+	    selection_summary_dic=selection_summary_dic,
+	    ranked_refs_dic=ranked_refs_dic,
+	    weights=weights,
+	    region_dic=region_dic,
+	    selection_metric=final_selection_metric,
+	    selection_mode=selection_mode,
+	    selection_cutoffs=selection_cutoffs,
+	    params=params,
+	    d_s_All=d_s_All,
+	    gene_list_All=gene_list_All,
+	    d_g_All=d_g_All,
+	    ref_adata_dic=ref_adata_dic,
+	    qry_adata_dic=qry_adata_dic,
+	)	
+
+	return result
+
 
 
 

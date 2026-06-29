@@ -15,29 +15,20 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # Local package imports
-from .util import get_region_genes, rank_genes_groups
+from .util import filter_ranked_genes, get_region_genes, rank_genes_groups
 
-# I. some supplementary utility functions
-# import rank_genes_group function
-# import get_region_genes function
-
-# II. feature select and distance measurements
-# logic: select region-specific features
-# feature distance, spatial distance
-# multi-modal distance
-# multi-sample distance: shared regions vs. unique regions
-
-# III. infer tree structure
-# hierarchical tree -> present tree as .png or .txt structure
-
-# IV. 
-# use the structure to guide gene selection for both range-based and nn-based framework
-
-# V.
-# demo: testing data and expected results | can be further imported into tutorial note
+# Pipeline:
+# read in reference_adata_dic 
+# -> select region-specific features (gene / image) within each reference sample
+# -> within each sample, integrate distances from different modalities
+# -> aggregate distances across samples
+# -> tree inference, save inferred results
+# -> tree structure to guide the subsequent hierarchical feature selection and label transfer
 
 
-
+#=======================================================================
+# Tree inference result objects
+#=======================================================================
 @dataclass
 class HierTree:
     node_dic: Dict[str, List[str]]
@@ -226,7 +217,17 @@ def _hierarchy_pos(
     return pos
 
 
-def tree_str_gene_selection(input_adata, gene_num=10, min_fold_change=1.15, min_in_out_group_ratio=1, min_in_group_fraction=0.5, pvals_adj=0.05, label_key="label", exclude_regions=("nan", "unknown"), print_results=True):
+def tree_str_gene_selection(
+    input_adata, 
+    gene_num=10, 
+    min_fold_change=1.15, 
+    min_in_out_group_ratio=1, 
+    min_in_group_fraction=0.5, 
+    pvals_adj=0.05, 
+    label_key="label", 
+    exclude_regions=("nan", "unknown"), 
+    exclude_mode="exact",
+    print_results=True):
     """
     Select region-specific genes for all tissue regions in input_adata.
 
@@ -248,6 +249,8 @@ def tree_str_gene_selection(input_adata, gene_num=10, min_fold_change=1.15, min_
         Column name in input_adata.obs containing tissue region labels.
     exclude_regions : tuple
         Region labels to exclude.
+    exclude_mode : {"contains", "exact"}
+        Whether to exclude labels by substring matching or exact matching.
     print_results : bool
         Whether to print intermediate results.
 
@@ -262,7 +265,23 @@ def tree_str_gene_selection(input_adata, gene_num=10, min_fold_change=1.15, min_
     region_genes_dic={}
 
     region_list=input_adata.obs[label_key].value_counts().index.tolist()
-    region_list=[region for region in region_list if str(region) not in exclude_regions]
+    #region_list=[region for region in region_list if str(region) not in exclude_regions]
+
+    if exclude_mode == "exact":
+        region_list = [
+            region for region in region_list
+            if str(region).lower() not in exclude_regions
+        ]
+
+    elif exclude_mode == "contains":
+        region_list = [
+            region for region in region_list
+            if not any(exclude_region in str(region).lower()
+                    for exclude_region in exclude_regions)
+        ]
+
+    else:
+        raise ValueError("exclude_mode must be either 'exact' or 'contains'.")
 
     print(f"Included tissue regions: {region_list}")
 
@@ -286,6 +305,270 @@ def tree_str_gene_selection(input_adata, gene_num=10, min_fold_change=1.15, min_
     return region_genes_dic, gene_list
 
 
+def select_tree_inference_features(
+    ref_adata_dic,
+    label_key="label",
+    image_available=False,
+    image_feature_key="hipt",
+    gene_filtering_paras=None,
+    image_filtering_paras=None,
+    exclude_regions=("nan", "unknown"),
+    exclude_mode="exact",
+    print_results=True,
+):
+    """
+    Select region-specific gene and optional image features for tree inference.
+
+    This function separates gene features and image features for each sample,
+    performs region-specific feature selection separately for each modality,
+    and returns a sample-specific feature dictionary for downstream distance
+    calculation.
+
+    Parameters
+    ----------
+    ref_adata_dic : dict
+        Dictionary of reference-sample-specific AnnData objects 
+        (including different-modal information if available).
+
+    label_key : str
+        Column in adata.obs containing tissue region labels.
+
+    image_available : bool
+        Whether image features are available and should be used.
+
+    image_feature_key : str
+        Keyword used to identify image features from adata.var.index.
+        For example: "hipt", "uni", "gigapath".
+
+    gene_filtering_paras : dict or None
+        Filtering parameters for region-specific gene feature selection.
+
+    image_filtering_paras : dict or None
+        Filtering parameters for region-specific image feature selection.
+
+    exclude_regions : tuple
+        Region names or keywords to exclude.
+
+    exclude_mode : {"exact", "contains"}
+        How to exclude regions.
+
+    print_results : bool
+        Whether to print intermediate information.
+
+    Returns
+    -------
+    features_dic : dict
+        Sample-specific feature dictionary.
+
+        Example:
+            {
+                "H1": {
+                    "gene": [...],
+                    "image": [...],
+                },
+                "G2": {
+                    "gene": [...],
+                    "image": [...],
+                },
+            }
+
+    region_genes_dic : dict
+        Region-specific selected gene features for each sample.
+
+    region_image_dic : dict
+        Region-specific selected image features for each sample.
+
+    selected_gene_dic : dict
+        Selected gene feature list for each sample.
+
+    selected_image_dic : dict
+        Selected image feature list for each sample.
+    """
+
+    # ============================================================
+    # Default parameters
+    # ============================================================
+
+    if gene_filtering_paras is None:
+        gene_filtering_paras = {
+            "min_fold_change": 1.1,
+            "min_in_out_group_ratio": 1,
+            "min_in_group_fraction": 0,
+            "pvals_adj": 0.05,
+            "gene_num": 10,
+        }
+
+    if image_filtering_paras is None:
+        image_filtering_paras = {
+            "min_fold_change": 1.1,
+            "min_in_out_group_ratio": 1,
+            "min_in_group_fraction": 0,
+            "pvals_adj": 0.05,
+            "gene_num": 5,
+        }
+
+    if len(ref_adata_dic) == 0:
+        raise ValueError("ref_adata_dic is empty.")
+
+    # ============================================================
+    # Initialize outputs
+    # ============================================================
+
+    features_dic = {}
+
+    region_genes_dic = {}
+    region_image_dic = {}
+
+    selected_gene_dic = {}
+    selected_image_dic = {}
+
+    if print_results:
+        print("\n============================================================")
+        print("Selecting region-specific gene and image features")
+        print("============================================================")
+
+    # ============================================================
+    # Select features sample by sample
+    # ============================================================
+
+    for sample_name, sample_adata in ref_adata_dic.items():
+
+        if print_results:
+            print(f"\n==================== Sample: {sample_name} ====================")
+
+        if label_key not in sample_adata.obs.columns:
+            raise ValueError(
+                f"{sample_name}: label_key='{label_key}' is not found in adata.obs."
+            )
+
+        all_features = sample_adata.var.index.tolist()
+
+        # ------------------------------------------------------------
+        # Separate gene and image features
+        # ------------------------------------------------------------
+
+        if image_available:
+            image_features = [
+                f for f in all_features
+                if image_feature_key.lower() in str(f).lower()
+            ]
+
+            gene_features = [
+                f for f in all_features
+                if image_feature_key.lower() not in str(f).lower()
+            ]
+
+        else:
+            image_features = []
+            gene_features = all_features
+
+        if len(gene_features) == 0:
+            raise ValueError(
+                f"{sample_name}: No gene features found after excluding image features."
+            )
+
+        # ------------------------------------------------------------
+        # Select region-specific gene features
+        # ------------------------------------------------------------
+
+        gene_adata = sample_adata[
+            :,
+            sample_adata.var.index.isin(gene_features)
+        ].copy()
+
+        if print_results:
+            print("\n-------------------- Gene feature selection --------------------")
+            print(f"Detected {len(gene_features)} gene features.")
+
+        sample_region_genes_dic, gene_list = tree_str_gene_selection(
+            input_adata=gene_adata,
+            gene_num=gene_filtering_paras["gene_num"],
+            min_fold_change=gene_filtering_paras["min_fold_change"],
+            min_in_out_group_ratio=gene_filtering_paras["min_in_out_group_ratio"],
+            min_in_group_fraction=gene_filtering_paras["min_in_group_fraction"],
+            pvals_adj=gene_filtering_paras["pvals_adj"],
+            label_key=label_key,
+            exclude_regions=exclude_regions,
+            exclude_mode=exclude_mode,
+            print_results=print_results,
+        )
+
+        region_genes_dic[sample_name] = sample_region_genes_dic
+        selected_gene_dic[sample_name] = gene_list
+
+        # ------------------------------------------------------------
+        # Select region-specific image features
+        # ------------------------------------------------------------
+
+        if image_available and len(image_features) > 0:
+
+            image_adata = sample_adata[
+                :,
+                sample_adata.var.index.isin(image_features)
+            ].copy()
+
+            if print_results:
+                print("\n-------------------- Image feature selection --------------------")
+                print(
+                    f"Detected {len(image_features)} image features "
+                    f"using image_feature_key='{image_feature_key}'."
+                )
+
+            sample_region_image_dic, image_list = tree_str_gene_selection(
+                input_adata=image_adata,
+                gene_num=image_filtering_paras["gene_num"],
+                min_fold_change=image_filtering_paras["min_fold_change"],
+                min_in_out_group_ratio=image_filtering_paras["min_in_out_group_ratio"],
+                min_in_group_fraction=image_filtering_paras["min_in_group_fraction"],
+                pvals_adj=image_filtering_paras["pvals_adj"],
+                label_key=label_key,
+                exclude_regions=exclude_regions,
+                exclude_mode=exclude_mode,
+                print_results=print_results,
+            )
+
+            region_image_dic[sample_name] = sample_region_image_dic
+            selected_image_dic[sample_name] = image_list
+
+        else:
+            image_list = []
+            region_image_dic[sample_name] = {}
+            selected_image_dic[sample_name] = []
+
+            if image_available and print_results:
+                print(
+                    f"No image features detected for sample {sample_name} "
+                    f"using image_feature_key='{image_feature_key}'."
+                )
+
+        # ------------------------------------------------------------
+        # Construct sample-specific feature dictionary
+        # ------------------------------------------------------------
+
+        features_dic[sample_name] = {
+            "gene": gene_list,
+            "image": image_list,
+        }
+
+    # ============================================================
+    # Feature selection summary
+    # ============================================================
+    if print_results:
+        for sample_name in ref_adata_dic:
+            print(f"\nSample: {sample_name}")
+            print(f"  Selected gene features: {len(features_dic[sample_name]['gene'])}")
+            print(f"  Selected image features: {len(features_dic[sample_name]['image'])}")
+
+    return {
+        "features_dic": features_dic,
+        "region_genes_dic": region_genes_dic,
+        "region_image_dic": region_image_dic,
+        "selected_gene_dic": selected_gene_dic,
+        "selected_image_dic": selected_image_dic,
+    }
+
+
+#========================================== Distance functions ==========================================
 def spatial_distance(spatial_df, label_key="label", x_key="x", y_key="y", neighbors=10, scale=True):
     #========== Step 0. Formatting ==========#
     # Turn spatial df into spatial AnnData format
@@ -781,9 +1064,6 @@ def integrate_distance_matrices(dists_dic, spot_counts, fill_diagonal=True, retu
     if len(missing_counts) > 0:
         raise ValueError(f"Missing spot counts for samples: {missing_counts}")
 
-        if spot_counts[sample_name] <= 0:
-            raise ValueError(f"{sample_name}: spot count must be positive.")
-
     # Union of all regions across all samples
     all_regions = sorted(
         set(region for dists in dists_dic.values() for region in dists.index)
@@ -846,7 +1126,7 @@ def integrate_distance_matrices(dists_dic, spot_counts, fill_diagonal=True, retu
 
 
 def multi_sample_distance(
-    adata_dic,
+    ref_adata_dic,
     features_dic,
     w_G=1,
     w_I=0,
@@ -867,8 +1147,8 @@ def multi_sample_distance(
 
     Parameters
     ----------
-    adata_dic : dict
-        Dictionary of AnnData objects.
+    ref_adata_dic : dict
+        Dictionary of reference AnnData objects.
 
         Example:
             {
@@ -922,14 +1202,14 @@ def multi_sample_distance(
         Sample-specific integrated multi-modal distance matrices.
     """
 
-    if len(adata_dic) == 0:
-        raise ValueError("adata_dic is empty.")
+    if len(ref_adata_dic) == 0:
+        raise ValueError("ref_adata_dic is empty.")
 
     sample_dists_dic = {}
     sample_rank_dic = {}
     spot_counts = {}
 
-    for sample_name, adata in adata_dic.items():
+    for sample_name, adata in ref_adata_dic.items():
         print(f"\n==================== Sample: {sample_name} ====================")
 
         # Support either shared features_dic or sample-specific features_dic
@@ -974,6 +1254,7 @@ def multi_sample_distance(
     return integrated_dists, integrated_ranks
 
 
+#========================================== Tree inference functions ==========================================
 def identify_region_pairs(rank_matrix):
     """
     Convert a rank matrix into an ordered list of region pairs.
@@ -1295,4 +1576,459 @@ def make_split_table(tree: HierTree) -> pd.DataFrame:
     split_df = pd.DataFrame(rows)
 
     return split_df
+
+
+def save_tree_inference_results(
+    config_dir: Path,
+    tree,
+    integrated_dists: pd.DataFrame,
+    integrated_ranks: pd.DataFrame,
+    sample_dists_dic: dict,
+    split_df: pd.DataFrame,
+    metadata: dict,
+) -> None:
+    """
+    Save all tree inference outputs for one parameter configuration.
+
+    Output structure:
+        config_dir/
+        ├── integrated_dists.csv
+        ├── integrated_ranks.csv
+        ├── tree_structure.txt
+        ├── tree_structure.png
+        ├── tree_object.pkl
+        ├── tree_split_table.csv
+        ├── metadata.json
+        └── sample_dists/
+            ├── H1_multi_modal_dists.csv
+            ├── G2_multi_modal_dists.csv
+            └── E1_multi_modal_dists.csv
+    """
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save integrated distance and rank matrices
+    integrated_dists.to_csv(config_dir / "integrated_dists.csv")
+    integrated_ranks.to_csv(config_dir / "integrated_ranks.csv")
+
+    # Save split table for downstream analyses
+    split_df.to_csv(config_dir / "tree_split_table.csv", index=False)
+
+    # Save sample-level multi-modal distance matrices
+    sample_dist_dir = config_dir / "sample_dists"
+    sample_dist_dir.mkdir(parents=True, exist_ok=True)
+
+    for sample_name, sample_dists in sample_dists_dic.items():
+        sample_dists.to_csv(sample_dist_dir / f"{sample_name}_multi_modal_dists.csv")
+
+    # Save readable tree structure
+    tree.save_txt(config_dir / "tree_structure.txt")
+    tree.save_png(config_dir / "tree_structure.png")
+
+    # Save full tree object for later reuse
+    with open(config_dir / "tree_object.pkl", "wb") as f:
+        pickle.dump(tree, f)
+
+    # Save metadata for reproducibility
+    with open(config_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+
+def get_first_hierarchy_split_from_tree(hier_tree):
+    """
+    Get the first hierarchy split directly from a fitted HierTree object.
+
+    The first hierarchy split is defined as the split from the root node
+    into its two child nodes.
+
+    Parameters
+    ----------
+    hier_tree : HierTree
+        Fitted hierarchical tree object.
+
+    Returns
+    -------
+    first_split_info : dict
+        Dictionary containing the root split information.
+
+        Keys include:
+            parent_node
+            child_node_1
+            child_node_2
+            child_1_regions
+            child_2_regions
+            split_key_1
+            split_key_2
+    """
+
+    parent_node = hier_tree.root_node
+
+    if hier_tree.is_leaf(parent_node):
+        raise ValueError(
+            f"The root_node='{parent_node}' is a leaf node. "
+            "No hierarchy split is available."
+        )
+
+    children = hier_tree.get_children(parent_node)
+
+    if len(children) != 2:
+        raise ValueError(
+            f"The root_node='{parent_node}' should have exactly two children, "
+            f"but got {len(children)} children: {children}."
+        )
+
+    child_node_1, child_node_2 = children
+
+    child_1_regions = hier_tree.get_regions(child_node_1)
+    child_2_regions = hier_tree.get_regions(child_node_2)
+
+    split_key_1 = f"{child_node_1}_vs_{child_node_2}"
+    split_key_2 = f"{child_node_2}_vs_{child_node_1}"
+
+    first_split_info = {
+        "parent_node": parent_node,
+        "child_node_1": child_node_1,
+        "child_node_2": child_node_2,
+        "child_1_regions": child_1_regions,
+        "child_2_regions": child_2_regions,
+        "split_key_1": split_key_1,
+        "split_key_2": split_key_2,
+    }
+
+    return first_split_info
+
+'''
+# usage:
+first_split_info = get_first_hierarchy_split_from_tree(hier_tree)
+
+split_key_1 = first_split_info["split_key_1"]
+split_key_2 = first_split_info["split_key_2"]
+
+'''
+
+
+def infer_hier_tree_pipeline(
+    ref_adata_dic,
+    label_key="label",
+    x_key="x",
+    y_key="y",
+    image_available=False,
+    image_feature_key="hipt",
+    gene_filtering_paras=None,
+    image_filtering_paras=None,
+    weights=None,
+    neighbors=None,
+    shape="hexagon",
+    scale=True,
+    show_tree=True,
+    output_dir=None,
+    return_results=True,
+    exclude_regions=("nan", "unknown"),
+    exclude_mode="contains",
+    print_results=True,
+):
+    """
+    Full tree inference pipeline.
+
+    This function integrates:
+
+        1. Region-specific gene feature selection.
+        2. Optional region-specific image feature selection.
+        3. Multi-modal distance calculation within each sample.
+        4. Multi-sample distance integration across samples.
+        5. Hierarchical tree inference.
+        6. Tree split table construction.
+        7. Optional saving of all tree inference outputs.
+
+    Parameters
+    ----------
+    ref_adata_dic : dict
+        Dictionary of reference-sample-specific AnnData objects.
+
+        Example:
+            {
+                "H1": adata_H1,
+                "G2": adata_G2,
+                "E1": adata_E1,
+            }
+
+        Each AnnData object may contain both gene features and image features
+        in `.var.index`.
+
+    label_key : str
+        Column in adata.obs containing tissue region labels.
+
+    x_key, y_key : str
+        Columns in adata.obs containing spatial coordinates.
+
+    image_available : bool
+        Whether image features are available and should be used.
+
+    image_feature_key : str
+        Keyword used to identify image features from adata.var.index.
+
+        Examples:
+            image_feature_key="hipt"
+            image_feature_key="uni"
+            image_feature_key="gigapath"
+
+        Features whose names contain this keyword are treated as image features.
+        All other features are treated as gene features.
+
+    gene_filtering_paras : dict or None
+        Parameters for selecting region-specific gene features.
+
+        Default:
+            {
+                "min_fold_change": 1.1,
+                "min_in_out_group_ratio": 1,
+                "min_in_group_fraction": 0,
+                "pvals_adj": 0.05,
+                "gene_num": 10,
+            }
+
+    image_filtering_paras : dict or None
+        Parameters for selecting region-specific image features.
+
+        Default:
+            {
+                "min_fold_change": 1.1,
+                "min_in_out_group_ratio": 1,
+                "min_in_group_fraction": 0,
+                "pvals_adj": 0.05,
+                "gene_num": 5,
+            }
+
+    weights : dict or None
+        Modality weights.
+
+        Default:
+            {
+                "w_G": 1,
+                "w_I": 1 if image_available else 0,
+                "w_S": 1,
+            }
+
+    neighbors : int or None
+        Number of spatial neighbors. If None, inferred from `shape`.
+
+    shape : {"hexagon", "square"}
+        Spatial layout type.
+
+    scale : bool
+        Whether to min-max scale modality-specific distance matrices.
+
+    show_tree : bool
+        Whether to show the inferred tree.
+
+    output_dir : str, Path, or None
+        If provided, save tree inference outputs to this directory.
+
+    return_results : bool
+        If True, return a dictionary containing the tree and intermediate results.
+        If False, return only the HierTree object.
+
+    exclude_regions : tuple
+        Region labels to exclude during feature selection.
+
+    exclude_mode : {"contains", "exact"}
+        Whether to exclude labels by substring matching or exact matching.
+
+    print_results : bool
+        Whether to print intermediate results.
+
+    Returns
+    -------
+    results_dic : dict
+        Returned when return_results=True.
+
+    tree : HierTree
+        Returned when return_results=False.
+    """
+
+    # ============================================================
+    # 0. Default parameters
+    # ============================================================
+    if weights is None:
+        weights = {
+            "w_G": 1,
+            "w_I": 1 if image_available else 0,
+            "w_S": 1,
+        }
+
+    # If image modality is not available, force image weight to 0.
+    if image_available is False:
+        weights["w_I"] = 0
+
+    if weights["w_G"] == 0 and weights["w_I"] == 0 and weights["w_S"] == 0:
+        raise ValueError("At least one of w_G, w_I, or w_S must be greater than 0.")
+
+    if len(ref_adata_dic) == 0:
+        raise ValueError("ref_adata_dic is empty.")
+
+    # ============================================================
+    # 1. Select gene and image features for each sample
+    # ============================================================
+    if print_results:
+        print("\n============================================================")
+        print("Step 1. Select gene and image features for each sample")
+        print("============================================================")
+
+    feature_results = select_tree_inference_features(
+        ref_adata_dic=ref_adata_dic,
+        label_key=label_key,
+        image_available=image_available,
+        image_feature_key=image_feature_key,
+        gene_filtering_paras=gene_filtering_paras,
+        image_filtering_paras=image_filtering_paras,
+        exclude_regions=exclude_regions,
+        exclude_mode=exclude_mode,
+        print_results=print_results,
+    )   
+
+    features_dic = feature_results["features_dic"]
+
+    region_genes_dic = feature_results["region_genes_dic"]
+    region_image_dic = feature_results["region_image_dic"]
+
+    selected_gene_dic = feature_results["selected_gene_dic"]
+    selected_image_dic = feature_results["selected_image_dic"]
+
+    #----------------------------------------------------
+    # Check feature selection results
+    #----------------------------------------------------
+    if weights["w_G"] > 0:
+        empty_gene_samples = [
+            sample_name
+            for sample_name in features_dic
+            if len(features_dic[sample_name]["gene"]) == 0
+        ]
+
+        if len(empty_gene_samples) > 0:
+            raise ValueError(
+                "w_G > 0, but no gene features were selected for samples: "
+                f"{empty_gene_samples}"
+            )
+
+    if weights["w_I"] > 0:
+        empty_image_samples = [
+            sample_name
+            for sample_name in features_dic
+            if len(features_dic[sample_name]["image"]) == 0
+        ]
+
+        if len(empty_image_samples) > 0:
+            raise ValueError(
+                "w_I > 0, but no image features were selected for samples: "
+                f"{empty_image_samples}. "
+                "Either check image_feature_key or set w_I=0."
+            )
+
+    # ============================================================
+    # 2. Multi-modal and multi-sample distance integration
+    # ============================================================
+    if print_results:
+        print("\n============================================================")
+        print("Step 2. Computing multi-modal and multi-sample distances")
+        print("============================================================")
+
+    integrated_dists, integrated_ranks, sample_dists_dic = multi_sample_distance(
+        ref_adata_dic=ref_adata_dic,
+        features_dic=features_dic,
+        w_G=weights["w_G"],
+        w_I=weights["w_I"],
+        w_S=weights["w_S"],
+        neighbors=neighbors,
+        shape=shape,
+        x_key=x_key,
+        y_key=y_key,
+        label_key=label_key,
+        scale=scale,
+        return_sample_dists=True,
+    )
+
+    # ============================================================
+    # 3. Infer hierarchical tree
+    # ============================================================
+    if print_results:
+        print("\n============================================================")
+        print("Step 3. Inferring hierarchical tree")
+        print("============================================================")
+
+    tree = build_hier_tree(
+        rank_matrix=integrated_ranks,
+        show=show_tree,
+    )
+
+    split_df = make_split_table(tree)
+
+    # ============================================================
+    # 4. Metadata
+    # ============================================================
+    metadata = {
+        "sample_names": list(ref_adata_dic.keys()),
+        "label_key": label_key,
+        "x_key": x_key,
+        "y_key": y_key,
+        "image_available": image_available,
+        "image_feature_key": image_feature_key,
+        "weights": weights,
+        "neighbors": neighbors,
+        "shape": shape,
+        "scale": scale,
+        "gene_filtering_paras": gene_filtering_paras,
+        "image_filtering_paras": image_filtering_paras,
+        "n_gene_features": {
+            sample_name: len(features_dic[sample_name]["gene"])
+            for sample_name in features_dic
+        },
+        "n_image_features": {
+            sample_name: len(features_dic[sample_name]["image"])
+            for sample_name in features_dic
+        },
+        "root_node": tree.root_node,
+        "region_names": tree.region_names,
+    }
+
+    # ============================================================
+    # 5. Save outputs
+    # ============================================================
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+
+        save_tree_inference_results(
+            config_dir=output_dir,
+            tree=tree,
+            integrated_dists=integrated_dists,
+            integrated_ranks=integrated_ranks,
+            sample_dists_dic=sample_dists_dic,
+            split_df=split_df,
+            metadata=metadata,
+        )
+
+    # ============================================================
+    # 6. Return
+    # ============================================================
+    results_dic = {
+        "tree": tree,
+        "integrated_dists": integrated_dists,
+        "integrated_ranks": integrated_ranks,
+        "sample_dists_dic": sample_dists_dic,
+        "split_df": split_df,
+        "features_dic": features_dic,
+        "region_genes_dic": region_genes_dic,
+        "region_image_dic": region_image_dic,
+        "selected_gene_dic": selected_gene_dic,
+        "selected_image_dic": selected_image_dic,
+        "metadata": metadata,
+    }
+
+    if return_results:
+        return results_dic
+
+    return tree
+
+
+
+
 

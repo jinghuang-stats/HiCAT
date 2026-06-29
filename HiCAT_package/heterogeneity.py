@@ -15,9 +15,79 @@ from .util import *
 
 
 #=======================================================================
+# Heterogeneity result objects
+#=======================================================================
+@dataclass
+class HeterogeneousRegionSubtypeResult:
+    """
+    Store subtype-discovery results for one heterogeneous tissue region.
+
+    Attributes
+    ----------
+    target_region : str
+        Tissue region selected as heterogeneous.
+    section_subtype_genes : dict
+        Section-level subtype marker gene unions returned by
+        section_subtype_DE_genes().
+    total_genes_list : list
+        Union of subtype marker genes across sections used for shared subtype
+        clustering.
+    total_clusters_num : int
+        Total number of section-level subtype clusters passing filtering.
+    subtype_clusters : pandas.DataFrame or None
+        Shared subtype cluster assignments for merged spots/cells.
+    shared_subtype_genes_merged : dict
+        Shared subtype marker genes identified from merged-section DE analysis.
+    shared_subtype_genes_individual : dict
+        Shared subtype marker genes identified by per-section DE plus overlap.
+    parameters : dict
+        Parameters used for this region-level subtype analysis.
+    """
+
+    target_region: str
+    section_subtype_genes: Dict[str, List[str]] = field(default_factory=dict)
+    total_genes_list: List[str] = field(default_factory=list)
+    total_clusters_num: int = 0
+    subtype_clusters: Optional[pd.DataFrame] = None
+    shared_subtype_genes_merged: Dict[str, List[str]] = field(default_factory=dict)
+    shared_subtype_genes_individual: Dict[str, List[str]] = field(default_factory=dict)
+    parameters: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ReferenceHeterogeneityResult:
+    """
+    Store reference-data heterogeneity results across regions and samples.
+
+    This object is intended as the main return object for the reference
+    heterogeneity pipeline. It keeps region-level heterogeneity scores, selected
+    heterogeneous regions, and subtype results for each selected region.
+    """
+
+    dataset_name: Optional[str] = None
+    hetero_summary: Optional[pd.DataFrame] = None
+    sta_summary: Optional[pd.DataFrame] = None
+    perm_sil_summary: Optional[pd.DataFrame] = None
+    selected_regions: List[str] = field(default_factory=list)
+    selected_region_scores: Optional[pd.DataFrame] = None
+    selection_method: str = "threshold"
+    selection_params: Dict[str, Any] = field(default_factory=dict)
+    subtype_results: Dict[str, HeterogeneousRegionSubtypeResult] = field(default_factory=dict)
+    sample_names: List[str] = field(default_factory=list)
+    parameters: Dict[str, Any] = field(default_factory=dict)
+
+    def get_region_subtypes(self, region: str) -> Optional[HeterogeneousRegionSubtypeResult]:
+        """Return subtype results for one selected heterogeneous region."""
+        return self.subtype_results.get(region)
+
+    def get_region_marker_genes(self, region: str) -> List[str]:
+        """Return region-specific marker genes used for heterogeneity scoring."""
+        return self.region_marker_genes.get(region, [])
+
+
+#=======================================================================
 # Part 1. Infer region-specific heterogeneous scores across samples 
 #=======================================================================
-
 def jaccard(a, b):
     """
     Compute Jaccard similarity between two gene sets.
@@ -595,7 +665,6 @@ def infer_heterogeneity_scores(
             "perm_sil_summary": permutation-adjusted silhouette summary,
             "d_g_all": sample-level region marker genes,
             "gene_list_all": sample-level union marker genes,
-            "df_filtered_all": filtered marker gene dataframes,
             "d_g_r": region-level union marker genes,
             "all_adata": merged AnnData object,
             "common_genes": common genes across samples,
@@ -717,7 +786,6 @@ def infer_heterogeneity_scores(
         "perm_sil_summary": perm_sil_summary,
         "d_g_all": d_g_all,
         "gene_list_all": gene_list_all,
-        "df_filtered_all": df_filtered_all,
         "d_g_r": d_g_r,
         "all_adata": all_adata,
         "common_genes": common_genes,
@@ -736,7 +804,7 @@ def infer_heterogeneity_scores(
 # identify shared subtype DE genes for functional interpretations
 
 def section_subtype_DE_genes(
-    adata_dic,
+    ref_region_adata_dic,
     tissue_section_list,
     target_region,
     res_dir,
@@ -754,8 +822,8 @@ def section_subtype_DE_genes(
     min_cluster_fraction=0.05,
     cat_color=None,
     cnt_colormap="coolwarm",
-    x_col="pixel_x",
-    y_col="pixel_y",
+    x_key="pixel_x",
+    y_key="pixel_y",
     fig_scale=2500,
     invert_x=False,
     invert_y=False,
@@ -779,10 +847,10 @@ def section_subtype_DE_genes(
     for tissue_section in tissue_section_list:
         print("======================================= " + tissue_section + " =======================================")
 
-        if tissue_section not in adata_dic:
-            raise KeyError(f"{tissue_section!r} is not present in adata_dic.")
+        if tissue_section not in ref_region_adata_dic:
+            raise KeyError(f"{tissue_section!r} is not present in ref_region_adata_dic.")
 
-        test_gene = adata_dic[tissue_section].copy()
+        test_gene = ref_region_adata_dic[tissue_section].copy()
 
         if test_gene.shape[0] < 2:
             raise ValueError(f"{tissue_section} has fewer than 2 spots.")
@@ -837,8 +905,8 @@ def section_subtype_DE_genes(
         os.makedirs(os.path.dirname(fig_path), exist_ok=True)
         cat_figure(
             input_adata=test_gene,
-            x_col=x_col,
-            y_col=y_col,
+            x_key=x_key,
+            y_key=y_key,
             fig_title=fig_title,
             fig_path=fig_path,
             color_key=cluster_key,
@@ -886,8 +954,8 @@ def section_subtype_DE_genes(
                     os.makedirs(os.path.dirname(fig_path), exist_ok=True)
                     con_figure(
                         input_adata=test_gene,
-                        x_col=x_col,
-                        y_col=y_col,
+                        x_key=x_key,
+                        y_key=y_key,
                         fig_title=fig_title,
                         fig_path=fig_path,
                         color_key=g,
@@ -1030,7 +1098,7 @@ def determine_best_cluster_number(
 
 
 def identify_shared_subtype(
-    adata_dic,
+    ref_adata_dic,
     tissue_section_list,
     target_region,
     total_genes_list,
@@ -1041,8 +1109,8 @@ def identify_shared_subtype(
     merged_key="sample",
     cluster_key="kmeans_clusters",
     random_state=0,
-    x_col="pixel_x",
-    y_col="pixel_y",
+    x_key="pixel_x",
+    y_key="pixel_y",
     fig_scale=2500,
     invert_x=False,
     invert_y=False,
@@ -1059,8 +1127,8 @@ def identify_shared_subtype(
 
     Parameters
     ----------
-    adata_dic : dict
-        Dictionary of tissue-section AnnData objects.
+    ref_adata_dic : dict
+        Dictionary of reference-tissue-section AnnData objects.
 
         Example:
         {
@@ -1106,10 +1174,10 @@ def identify_shared_subtype(
         Categorical color palette for subtype visualization. If None, the default
         categorical palette from `_default_cat_color` is used.
 
-    x_col : str, default="pixel_x"
+    x_key : str, default="pixel_x"
         Column in `.obs` containing x coordinates.
 
-    y_col : str, default="pixel_y"
+    y_key : str, default="pixel_y"
         Column in `.obs` containing y coordinates.
 
     fig_scale : float, default=2500
@@ -1148,7 +1216,7 @@ def identify_shared_subtype(
 
     # ---------------- 1. Construct merged AnnData ----------------
     merged_adata_sca, gene_df = construct_merged_scaled_adata_and_gene_df(
-        adata_dic=adata_dic,
+        ref_adata_dic=ref_adata_dic,
         tissue_section_list=tissue_section_list,
         total_genes_list=total_genes_list,
         merged_key=merged_key,
@@ -1206,8 +1274,8 @@ def identify_shared_subtype(
 
             cat_figure(
                 input_adata=section_adata,
-                x_col=x_col,
-                y_col=y_col,
+                x_key=x_key,
+                y_key=y_key,
                 fig_title=fig_title,
                 fig_path=fig_path,
                 color_key=cluster_key,
@@ -1285,8 +1353,8 @@ def identify_shared_subtype(
 
             cat_figure(
                 input_adata=section_adata,
-                x_col=x_col,
-                y_col=y_col,
+                x_key=x_key,
+                y_key=y_key,
                 fig_title=fig_title,
                 fig_path=fig_path,
                 color_key=cluster_key,
@@ -1433,7 +1501,7 @@ def identify_overlap_genes_across_sections(
 
 
 def shared_subtype_DE_genes(
-    adata_dic,
+    ref_region_adata_dic,
     tissue_section_list,
     target_region,
     res_dir,
@@ -1446,8 +1514,8 @@ def shared_subtype_DE_genes(
     min_fold_change=1.1,
     merged_gene_num=15,
     individual_gene_num=35,
-    x_col="pixel_x",
-    y_col="pixel_y",
+    x_key="pixel_x",
+    y_key="pixel_y",
     fig_scale=2500,
     invert_x=False,
     invert_y=False,
@@ -1471,8 +1539,8 @@ def shared_subtype_DE_genes(
 
     Parameters
     ----------
-    adata_dic : dict
-        Dictionary of tissue-section AnnData objects.
+    ref_region_adata_dic : dict
+        Dictionary of reference-region AnnData objects.
 
     tissue_section_list : list
         List of tissue-section names to include.
@@ -1513,10 +1581,10 @@ def shared_subtype_DE_genes(
     individual_gene_num : int, default=35
         Maximum number of genes selected per subtype per section before overlap.
 
-    x_col : str, default="pixel_x"
+    x_key : str, default="pixel_x"
         Column in `.obs` containing x coordinates.
 
-    y_col : str, default="pixel_y"
+    y_key : str, default="pixel_y"
         Column in `.obs` containing y coordinates.
 
     fig_scale : float, default=2500
@@ -1565,7 +1633,7 @@ def shared_subtype_DE_genes(
     # ------------------------------------------------------------------
     # Raw/non-normalized merged object for per-section DE.
     merged_adata, _ = construct_merged_scaled_adata_and_gene_df(
-        adata_dic=adata_dic,
+        ref_adata_dic=ref_region_adata_dic,
         tissue_section_list=tissue_section_list,
         total_genes_list=None,
         merged_key=merged_key,
@@ -1575,7 +1643,7 @@ def shared_subtype_DE_genes(
 
     # Normalized merged object for merged-section DE and visualization.
     merged_adata_sca, _ = construct_merged_scaled_adata_and_gene_df(
-        adata_dic=adata_dic,
+        ref_adata_dic=ref_region_adata_dic,
         tissue_section_list=tissue_section_list,
         total_genes_list=None,
         merged_key=merged_key,
@@ -1694,8 +1762,8 @@ def shared_subtype_DE_genes(
 
                 con_figure(
                     input_adata=section_adata,
-                    x_col=x_col,
-                    y_col=y_col,
+                    x_key=x_key,
+                    y_key=y_key,
                     fig_title=fig_title,
                     fig_path=fig_path,
                     color_key=g,
@@ -1796,8 +1864,8 @@ def shared_subtype_DE_genes(
 
                 con_figure(
                     input_adata=section_adata,
-                    x_col=x_col,
-                    y_col=y_col,
+                    x_key=x_key,
+                    y_key=y_key,
                     fig_title=fig_title,
                     fig_path=fig_path,
                     color_key=g,
@@ -1808,6 +1876,971 @@ def shared_subtype_DE_genes(
                 )
 
     return d_g_merged, d_g_ind
+
+
+#=======================================================================
+# Part 3. End-to-end reference heterogeneity pipeline
+#=======================================================================
+def select_heterogeneous_regions(
+    hetero_summary,
+    method="threshold",
+    score_key="hetero_score_sca",
+    threshold=0.5,
+    top_k=None,
+    include_ties=True,
+    print_results=True,
+):
+    """
+    Select heterogeneous tissue regions from a region-level heterogeneity table.
+
+    Two selection frameworks are supported:
+        1. method="threshold": select regions with score >= threshold.
+        2. method="top_k": select the top-k highest-scoring regions.
+
+    Parameters
+    ----------
+    hetero_summary : pandas.DataFrame
+        Region-level heterogeneity score table returned by
+        compute_final_heterogeneity_score() or infer_heterogeneity_scores().
+
+    method : {"threshold", "top_k"}, default="threshold"
+        Selection framework.
+
+    score_key : str, default="hetero_score_sca"
+        Column used to rank/select heterogeneous regions.
+
+    threshold : float, default=0.5
+        Score cutoff used when method="threshold".
+
+    top_k : int or None, default=None
+        Number of top heterogeneous regions selected when method="top_k".
+
+    include_ties : bool, default=True
+        If True and method="top_k", include regions tied with the kth score.
+
+    print_results : bool, default=True
+        Whether to print selected regions.
+
+    Returns
+    -------
+    selected_regions : list
+        Selected heterogeneous tissue regions.
+
+    selected_region_scores : pandas.DataFrame
+        Subset of hetero_summary for selected regions.
+    """
+
+    if hetero_summary is None or hetero_summary.shape[0] == 0:
+        raise ValueError("hetero_summary is empty.")
+
+    if score_key not in hetero_summary.columns:
+        raise KeyError(f"{score_key!r} is not present in hetero_summary.")
+
+    if method not in ["threshold", "top_k"]:
+        raise ValueError("method must be either 'threshold' or 'top_k'.")
+
+    score_table = hetero_summary.copy()
+    score_table = score_table.loc[score_table[score_key].notna()].copy()
+    score_table = score_table.sort_values(by=score_key, ascending=False)
+
+    if method == "threshold":
+        selected_region_scores = score_table.loc[
+            score_table[score_key] >= threshold
+        ].copy()
+
+    else:
+        if top_k is None:
+            raise ValueError("top_k must be provided when method='top_k'.")
+
+        top_k = int(top_k)
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1.")
+
+        top_k = min(top_k, score_table.shape[0])
+
+        if include_ties:
+            kth_score = score_table.iloc[top_k - 1][score_key]
+            selected_region_scores = score_table.loc[
+                score_table[score_key] >= kth_score
+            ].copy()
+        else:
+            selected_region_scores = score_table.iloc[:top_k].copy()
+
+    selected_regions = selected_region_scores.index.astype(str).tolist()
+
+    if print_results:
+        print("Selected heterogeneous regions:")
+        print(selected_region_scores[[score_key]])
+
+    return selected_regions, selected_region_scores
+
+
+def infer_region_shared_subtypes(
+    ref_adata_dic,
+    target_region,
+    res_dir,
+    label_key="label",
+    min_region_spots=10,
+    pcs_num=30,
+    section_cluster_method="leiden_clusters",
+    section_n_clusters=2,
+    leiden_res=0.5,
+    n_neighbors=15,
+    shared_cluster_key="kmeans_clusters",
+    set_shared_clusters_num=None,
+    overlap_cutoff=2,
+    random_state=0,
+    pvals_adj=0.05,
+    min_in_out_group_ratio=1.0,
+    min_in_group_fraction=0.5,
+    min_fold_change=1.10,
+    section_gene_num=10,
+    merged_gene_num=15,
+    individual_gene_num=35,
+    min_cluster_fraction=0.05,
+    cat_color=None,
+    cnt_colormap="coolwarm",
+    x_key="pixel_x",
+    y_key="pixel_y",
+    fig_scale=2500,
+    invert_x=False,
+    invert_y=False,
+    merged_key="sample",
+    print_results=True,
+):
+    """
+    Identify shared heterogeneous subtypes and subtype-specific marker genes
+    for one target tissue region.
+
+    This function expects full sample-level reference AnnData objects as input.
+    It first subsets each sample to `target_region`, then runs the existing
+
+    The pipeline includes three major steps:
+
+        0. Subset each reference sample to `target_region`.
+        1. Cluster spots/cells within each retained sample and identify
+           section-level subtype marker genes.
+        2. Merge retained samples and identify shared subtypes across samples.
+        3. Identify shared subtype-specific marker genes using both:
+            - merged-sample differential expression;
+            - per-section differential expression followed by overlap selection.
+
+    Parameters
+    ----------
+    ref_adata_dic : dict
+        Dictionary of full sample-level reference AnnData objects.
+
+        Example:
+        {
+            "H1": adata_H1,
+            "G2": adata_G2,
+            "E1": adata_E1
+        }
+
+        Each AnnData object should contain gene-expression features in `.X`
+        and tissue-region labels in `.obs[label_key]`.
+
+    target_region : str
+        Tissue region for which heterogeneous subtypes will be inferred.
+
+        Example:
+        "Invasive", "CIS", "Immune", or another region label present in
+        `adata.obs[label_key]`.
+
+    res_dir : str
+        Directory where subtype clustering results, subtype marker gene plots,
+        and intermediate output files will be saved.
+
+    label_key : str, default="label"
+        Column in `.obs` containing tissue-region annotations.
+
+    min_region_spots : int, default=10
+        Minimum number of spots/cells required for a sample to be retained
+        after subsetting to `target_region`.
+
+        Samples with fewer than `min_region_spots` observations in the target
+        region are excluded from subtype inference for that region.
+
+    pcs_num : int, default=30
+        Number of principal components used for section-level subtype clustering.
+
+    section_cluster_method : {"leiden_clusters", "kmeans_clusters"}, default="leiden_clusters"
+        Clustering method used within each individual reference sample.
+
+        - "leiden_clusters": graph-based Leiden clustering.
+        - "kmeans_clusters": KMeans clustering.
+
+    section_n_clusters : int, default=2
+        Number of clusters used for section-level KMeans clustering.
+        Only used when `section_cluster_method="kmeans_clusters"`.
+
+    leiden_res : float, default=0.5
+        Leiden resolution parameter.
+        Only used when `section_cluster_method="leiden_clusters"`.
+
+    n_neighbors : int, default=15
+        Number of nearest neighbors used to construct the graph for Leiden
+        clustering.
+
+    shared_cluster_key : {"kmeans_clusters", "heatmap_clusters"}, default="kmeans_clusters"
+        Clustering method used to identify shared subtypes across merged
+        reference samples.
+
+        - "kmeans_clusters": KMeans clustering on the merged gene-expression matrix.
+        - "heatmap_clusters": hierarchical clustering based on a heatmap.
+
+    set_shared_clusters_num : int or None, default=None
+        User-specified number of shared subtype clusters.
+
+        If None, the number of shared clusters is selected automatically using
+        silhouette scores.
+
+    overlap_cutoff : int, default=2
+        Minimum number of reference samples in which a subtype marker gene must
+        appear to be retained in the per-section overlap strategy.
+
+        The effective cutoff is capped by the maximum observed count for each
+        subtype, so the function can still return genes when fewer samples are
+        available.
+
+    random_state : int, default=0
+        Random seed used for PCA, KMeans, Leiden clustering, and other
+        stochastic steps.
+
+    pvals_adj : float, default=0.05
+        Adjusted p-value cutoff for subtype marker gene selection.
+
+    min_in_out_group_ratio : float, default=1.0
+        Minimum ratio between expression inside the target subtype and outside
+        the target subtype.
+
+    min_in_group_fraction : float, default=0.5
+        Minimum fraction of spots/cells within the target subtype expressing
+        the marker gene.
+
+    min_fold_change : float, default=1.10
+        Minimum fold-change required for subtype marker gene selection.
+
+    section_gene_num : int, default=10
+        Number of marker genes selected for each subtype cluster within each
+        individual reference sample.
+
+    merged_gene_num : int, default=15
+        Number of subtype marker genes selected for each shared subtype using
+        the merged-sample strategy.
+
+    individual_gene_num : int, default=35
+        Number of subtype marker genes selected for each shared subtype within
+        each individual section before overlap filtering.
+
+    min_cluster_fraction : float, default=0.05
+        Minimum proportion of spots/cells required for a subtype cluster to be
+        included in marker gene selection.
+
+        Clusters smaller than this fraction are treated as small clusters and
+        excluded from downstream DE gene selection.
+
+    cat_color : list or dict or None, default=None
+        Color palette used for categorical subtype-cluster visualization.
+        If None, the default categorical palette is used.
+
+    cnt_colormap : str, default="coolwarm"
+        Continuous colormap used for subtype marker gene expression plots.
+
+    x_key : str, default="pixel_x"
+        Column in `.obs` containing x-coordinates for spatial visualization.
+
+    y_col : str, default="pixel_y"
+        Column in `.obs` containing y-coordinates for spatial visualization.
+
+    fig_scale : float, default=2500
+        Scaling factor used to determine point size in spatial plots.
+
+    invert_x : bool, default=False
+        Whether to invert the x-axis in spatial plots.
+
+    invert_y : bool, default=False
+        Whether to invert the y-axis in spatial plots.
+
+    merged_key : str, default="sample"
+        Column name used in merged AnnData objects to indicate the source
+        reference sample.
+
+    print_results : bool, default=True
+        Whether to print intermediate progress, cluster proportions, selected
+        genes, and skip messages.
+
+    Returns
+    -------
+    region_result : HeterogeneousRegionSubtypeResult
+        Region-level subtype result object containing shared subtype inference
+        results for `target_region`.
+
+        The object includes:
+
+        target_region : str
+            Name of the analyzed tissue region.
+
+        section_subtype_genes : dict
+            Section-level subtype marker genes.
+
+            Example:
+            {
+                "H1": ["GeneA", "GeneB", ...],
+                "G2": ["GeneC", "GeneD", ...]
+            }
+
+        total_genes_list : list
+            Union of subtype marker genes selected across retained reference
+            samples. These genes are used for shared subtype clustering.
+
+        total_clusters_num : int
+            Total number of non-small subtype clusters detected across retained
+            reference samples.
+
+        subtype_clusters : pandas.DataFrame or None
+            DataFrame containing shared subtype assignments for spots/cells in
+            the merged target-region AnnData object.
+
+            This is None if shared subtype clustering is skipped.
+
+        shared_subtype_genes_merged : dict
+            Shared subtype marker genes identified from the merged-sample
+            differential expression strategy.
+
+            Example:
+            {
+                "subtype0": ["GeneA", "GeneB"],
+                "subtype1": ["GeneC", "GeneD"]
+            }
+
+        shared_subtype_genes_individual : dict
+            Shared subtype marker genes identified from the per-section
+            differential expression and overlap strategy.
+
+            Example:
+            {
+                "subtype0": ["GeneA"],
+                "subtype1": ["GeneC"]
+            }
+
+        parameters : dict
+            Parameters and metadata used for this region, including retained
+            sections, clustering parameters, overlap cutoff, and skip reason
+            when applicable.
+
+    Notes
+    -----
+    If fewer than two reference samples contain at least `min_region_spots`
+    observations in `target_region`, the function skips subtype inference and
+    returns a `HeterogeneousRegionSubtypeResult` object with a skip reason.
+
+    If section-level subtype clustering does not produce enough subtype genes
+    or enough non-small clusters, shared subtype clustering is also skipped.
+    """
+
+    region_adata_dic, retained_sections = subset_adata_dic_by_region(
+        ref_adata_dic=ref_adata_dic,
+        target_region=target_region,
+        label_key=label_key,
+        min_spots=min_region_spots,
+        copy=True,
+        print_results=print_results,
+    )
+
+    if len(retained_sections) < 2:
+        if print_results:
+            print(
+                f"Skip {target_region}: fewer than two samples have at least "
+                f"{min_region_spots} spots."
+            )
+
+        return HeterogeneousRegionSubtypeResult(
+            target_region=str(target_region),
+            parameters={
+                "retained_sections": retained_sections,
+                "min_region_spots": min_region_spots,
+                "skipped_reason": "fewer_than_two_retained_sections",
+            },
+        )
+
+    region_res_dir = os.path.join(res_dir, str(target_region))
+    os.makedirs(region_res_dir, exist_ok=True)
+
+    section_subtype_genes, total_genes_list, total_clusters_num = section_subtype_DE_genes(
+        ref_region_adata_dic=region_adata_dic,
+        tissue_section_list=retained_sections,
+        target_region=target_region,
+        res_dir=region_res_dir,
+        pcs_num=pcs_num,
+        cluster_method=section_cluster_method,
+        n_clusters=section_n_clusters,
+        leiden_res=leiden_res,
+        n_neighbors=n_neighbors,
+        random_state=random_state,
+        pvals_adj=pvals_adj,
+        min_in_out_group_ratio=min_in_out_group_ratio,
+        min_in_group_fraction=min_in_group_fraction,
+        min_fold_change=min_fold_change,
+        gene_num=section_gene_num,
+        min_cluster_fraction=min_cluster_fraction,
+        cat_color=cat_color,
+        cnt_colormap=cnt_colormap,
+        x_key=x_key,
+        y_key=y_key,
+        fig_scale=fig_scale,
+        invert_x=invert_x,
+        invert_y=invert_y,
+    )
+
+    if len(total_genes_list) == 0 or total_clusters_num < 2:
+        if print_results:
+            print(
+                f"Skip shared subtype clustering for {target_region}: "
+                "not enough subtype genes or section-level clusters."
+            )
+
+        return HeterogeneousRegionSubtypeResult(
+            target_region=str(target_region),
+            section_subtype_genes=section_subtype_genes,
+            total_genes_list=total_genes_list,
+            total_clusters_num=total_clusters_num,
+            parameters={
+                "retained_sections": retained_sections,
+                "skipped_reason": "insufficient_subtype_genes_or_clusters",
+            },
+        )
+
+    subtype_clusters = identify_shared_subtype(
+        ref_adata_dic=region_adata_dic,
+        tissue_section_list=retained_sections,
+        target_region=target_region,
+        total_genes_list=total_genes_list,
+        total_clusters_num=total_clusters_num,
+        res_dir=region_res_dir,
+        cat_color=cat_color,
+        set_clusters_num=set_shared_clusters_num,
+        merged_key=merged_key,
+        cluster_key=shared_cluster_key,
+        random_state=random_state,
+        x_key=x_key,
+        y_key=y_key,
+        fig_scale=fig_scale,
+        invert_x=invert_x,
+        invert_y=invert_y,
+        print_results=print_results,
+    )
+
+    shared_subtype_genes_merged, shared_subtype_genes_individual = shared_subtype_DE_genes(
+        ref_region_adata_dic=region_adata_dic,
+        tissue_section_list=retained_sections,
+        target_region=target_region,
+        res_dir=region_res_dir,
+        overlap_cutoff=overlap_cutoff,
+        subtype_clusters=subtype_clusters,
+        subtype_cluster_key=shared_cluster_key,
+        pvals_adj=pvals_adj,
+        min_in_out_group_ratio=min_in_out_group_ratio,
+        min_in_group_fraction=min_in_group_fraction,
+        min_fold_change=min_fold_change,
+        merged_gene_num=merged_gene_num,
+        individual_gene_num=individual_gene_num,
+        x_key=x_key,
+        y_key=y_key,
+        fig_scale=fig_scale,
+        invert_x=invert_x,
+        invert_y=invert_y,
+        merged_key=merged_key,
+        cnt_colormap=cnt_colormap,
+        min_cluster_fraction=min_cluster_fraction,
+        print_results=print_results,
+    )
+
+    return HeterogeneousRegionSubtypeResult(
+        target_region=str(target_region),
+        section_subtype_genes=section_subtype_genes,
+        total_genes_list=total_genes_list,
+        total_clusters_num=total_clusters_num,
+        subtype_clusters=subtype_clusters,
+        shared_subtype_genes_merged=shared_subtype_genes_merged,
+        shared_subtype_genes_individual=shared_subtype_genes_individual,
+        parameters={
+            "retained_sections": retained_sections,
+            "pcs_num": pcs_num,
+            "section_cluster_method": section_cluster_method,
+            "section_n_clusters": section_n_clusters,
+            "leiden_res": leiden_res,
+            "n_neighbors": n_neighbors,
+            "shared_cluster_key": shared_cluster_key,
+            "set_shared_clusters_num": set_shared_clusters_num,
+            "overlap_cutoff": overlap_cutoff,
+            "random_state": random_state,
+            "min_cluster_fraction": min_cluster_fraction,
+        },
+    )
+
+
+def infer_heterogeneity_pipeline(
+    ref_adata_dic,
+    all_adata,
+    dataset_name=None,
+    common_genes=None,
+    tissue_region_list=None,
+    label_key="label",
+    sample_key="sample",
+    res_dir="heterogeneity_results",
+    selection_method="threshold",
+    hetero_threshold=0.5,
+    top_k=None,
+    score_key="hetero_score_sca",
+    run_subtype=True,
+    min_region_spots=10,
+    pvals_adj=0.05,
+    min_in_out_group_ratio=1.0,
+    min_in_group_fraction=0.5,
+    min_fold_change=1.10,
+    region_gene_num=10,
+    n_perm=200,
+    one_sided=True,
+    pcs_num=30,
+    section_cluster_method="leiden_clusters",
+    section_n_clusters=2,
+    leiden_res=0.5,
+    n_neighbors=15,
+    shared_cluster_key="kmeans_clusters",
+    set_shared_clusters_num=None,
+    overlap_cutoff=2,
+    section_gene_num=10,
+    merged_gene_num=15,
+    individual_gene_num=35,
+    min_cluster_fraction=0.05,
+    random_state=0,
+    cat_color=None,
+    cnt_colormap="coolwarm",
+    x_key="pixel_x",
+    y_key="pixel_y",
+    fig_scale=2500,
+    invert_x=False,
+    invert_y=False,
+    merged_key="sample",
+    print_results=True,
+):
+    """
+    Run the full reference heterogeneity inference pipeline using gene-expression
+    AnnData objects.
+
+    This pipeline is designed for reference data only. It evaluates
+    region-specific heterogeneity levels across multiple reference samples,
+    selects heterogeneous tissue regions, and optionally identifies shared
+    subtypes and subtype-specific marker genes within the selected regions.
+
+    The pipeline includes four main steps:
+
+        1. Infer region-specific heterogeneity scores across reference samples.
+        2. Select heterogeneous regions using either:
+            - a hard score threshold, or
+            - the top-k highest-scoring regions.
+        3. For each selected heterogeneous region, identify shared subtypes
+           across reference samples.
+        4. Identify subtype-specific marker genes using both merged-sample and
+           per-section overlap strategies.
+
+    Parameters
+    ----------
+    ref_adata_dic : dict
+        Dictionary of sample-level reference AnnData objects.
+
+        Example:
+        {
+            "H1": adata_H1,
+            "G2": adata_G2,
+            "E1": adata_E1
+        }
+
+        Each AnnData object should contain gene-expression values in `.X`,
+        gene names in `.var_names`, and tissue-region labels in
+        `.obs[label_key]`.
+
+    all_adata : AnnData
+        Merged reference AnnData object across all samples.
+
+        This object should contain all observations from `ref_adata_dic`, with
+        sample identity stored in `.obs[sample_key]` and region labels stored in
+        `.obs[label_key]`.
+
+    dataset_name : str or None, default=None
+        Optional dataset name stored in the returned result object.
+
+        Example:
+        "HER2+BC", "Tonsil", or "Brain_AD".
+
+    common_genes : list or None, default=None
+        Common gene set used for heterogeneity score inference.
+
+        If None, genes are inferred from `all_adata.var_names`.
+
+    tissue_region_list : list or None, default=None
+        Tissue regions to evaluate.
+
+        If None, regions are inferred from `all_adata.obs[label_key]`, excluding
+        missing or unknown labels.
+
+    label_key : str, default="label"
+        Column in `.obs` containing tissue-region annotations.
+
+    sample_key : str, default="sample"
+        Column in `all_adata.obs` containing sample or section identities.
+
+    res_dir : str, default="heterogeneity_results"
+        Directory where subtype clustering results, plots, and intermediate
+        outputs are saved.
+
+    selection_method : {"threshold", "top_k"}, default="threshold"
+        Method used to select heterogeneous regions.
+
+        - "threshold": select regions whose score is greater than or equal to
+          `hetero_threshold`.
+        - "top_k": select the top `top_k` regions ranked by `score_key`.
+
+    hetero_threshold : float, default=0.5
+        Hard cutoff used when `selection_method="threshold"`.
+
+        Regions with `hetero_summary[score_key] >= hetero_threshold` are
+        selected as heterogeneous.
+
+    top_k : int or None, default=None
+        Number of top-ranked heterogeneous regions to select when
+        `selection_method="top_k"`.
+
+        If `selection_method="top_k"`, this should be a positive integer.
+
+    score_key : str, default="hetero_score_sca"
+        Column in `hetero_summary` used for heterogeneous-region selection.
+
+        Usually this is the scaled final heterogeneity score,
+        `"hetero_score_sca"`.
+
+    run_subtype : bool, default=True
+        Whether to run shared subtype discovery and subtype marker gene
+        selection for selected heterogeneous regions.
+
+        If False, only heterogeneity scores and selected regions are returned.
+
+    min_region_spots : int, default=10
+        Minimum number of spots/cells required for a region to be evaluated
+        within a sample.
+
+        This parameter is used both in heterogeneity score inference and in
+        region-level subtype analysis.
+
+    pvals_adj : float, default=0.05
+        Adjusted p-value cutoff for marker gene selection.
+
+        Used for both region-specific marker genes and subtype-specific marker
+        genes.
+
+    min_in_out_group_ratio : float, default=1.0
+        Minimum expression ratio between the target group and the remaining
+        groups for marker gene selection.
+
+    min_in_group_fraction : float, default=0.5
+        Minimum fraction of spots/cells within the target group expressing a
+        candidate marker gene.
+
+    min_fold_change : float, default=1.10
+        Minimum fold-change required for marker gene selection.
+
+    region_gene_num : int, default=10
+        Number of region-specific marker genes selected per region per sample
+        during heterogeneity score inference.
+
+    n_perm : int, default=200
+        Number of permutations used to compute permutation-adjusted silhouette
+        scores.
+
+    one_sided : bool, default=True
+        Whether to use a one-sided permutation p-value when computing adjusted
+        silhouette scores.
+
+    pcs_num : int, default=30
+        Number of principal components used for section-level subtype clustering.
+
+        Only used when `run_subtype=True`.
+
+    section_cluster_method : {"leiden_clusters", "kmeans_clusters"}, default="leiden_clusters"
+        Clustering method used within each individual reference sample for
+        subtype discovery.
+
+        Only used when `run_subtype=True`.
+
+    section_n_clusters : int, default=2
+        Number of clusters used for section-level KMeans clustering.
+
+        Only used when `section_cluster_method="kmeans_clusters"`.
+
+    leiden_res : float, default=0.5
+        Resolution parameter for section-level Leiden clustering.
+
+        Only used when `section_cluster_method="leiden_clusters"`.
+
+    n_neighbors : int, default=15
+        Number of neighbors used to construct the nearest-neighbor graph for
+        Leiden clustering.
+
+    shared_cluster_key : {"kmeans_clusters", "heatmap_clusters"}, default="kmeans_clusters"
+        Method used to identify shared subtype clusters across merged reference
+        samples.
+
+        - "kmeans_clusters": KMeans clustering on the merged target-region
+          expression matrix.
+        - "heatmap_clusters": hierarchical clustering from heatmap linkage.
+
+    set_shared_clusters_num : int or None, default=None
+        User-specified number of shared subtype clusters.
+
+        If None, the number of shared subtype clusters is selected
+        automatically using silhouette scores.
+
+    overlap_cutoff : int, default=2
+        Minimum number of reference samples in which a subtype marker gene must
+        appear to be retained in the per-section overlap strategy.
+
+    section_gene_num : int, default=10
+        Number of subtype marker genes selected for each subtype cluster within
+        each individual reference sample.
+
+    merged_gene_num : int, default=15
+        Number of subtype marker genes selected for each shared subtype using
+        the merged-sample differential expression strategy.
+
+    individual_gene_num : int, default=35
+        Number of subtype marker genes selected for each shared subtype within
+        each individual sample before overlap filtering.
+
+    min_cluster_fraction : float, default=0.05
+        Minimum proportion of spots/cells required for a subtype cluster to be
+        included in marker gene selection.
+
+        Small clusters below this fraction are excluded from downstream subtype
+        marker gene selection.
+
+    random_state : int, default=0
+        Random seed used for stochastic steps, including PCA, clustering, and
+        permutation-based score adjustment.
+
+    cat_color : list or dict or None, default=None
+        Color palette used for categorical subtype-cluster visualization.
+
+        If None, the default categorical palette is used.
+
+    cnt_colormap : str, default="coolwarm"
+        Continuous colormap used for marker gene expression visualization.
+
+    x_key : str, default="pixel_x"
+        Column in `.obs` containing x-coordinates for spatial plots.
+
+    y_col : str, default="pixel_y"
+        Column in `.obs` containing y-coordinates for spatial plots.
+
+    fig_scale : float, default=2500
+        Scaling factor used to determine point size in spatial plots.
+
+    invert_x : bool, default=False
+        Whether to invert the x-axis in spatial plots.
+
+    invert_y : bool, default=False
+        Whether to invert the y-axis in spatial plots.
+
+    merged_key : str, default="sample"
+        Column name used in merged AnnData objects to indicate the source
+        reference sample.
+
+    print_results : bool, default=True
+        Whether to print progress messages, intermediate score summaries,
+        selected regions, clustering summaries, and selected marker genes.
+
+    Returns
+    -------
+    result : ReferenceHeterogeneityResult
+        Main reference heterogeneity result object.
+
+        The object contains:
+
+        dataset_name : str or None
+            Dataset name provided by the user.
+
+        hetero_summary : pandas.DataFrame
+            Final region-level heterogeneity score summary.
+
+            This includes marker instability scores, permutation-adjusted
+            silhouette scores, and final heterogeneity scores.
+
+        sta_summary : pandas.DataFrame
+            Region-level marker gene stability or instability summary.
+
+        perm_sil_summary : pandas.DataFrame
+            Region-level permutation-adjusted silhouette score summary.
+
+        selected_regions : list
+            Tissue regions selected as heterogeneous according to
+            `selection_method`.
+
+        selected_region_scores : pandas.DataFrame
+            Score table for selected heterogeneous regions.
+
+        selection_method : str
+            Heterogeneous-region selection method used in the pipeline.
+
+        selection_params : dict
+            Selection-related parameters, including `score_key`,
+            `hetero_threshold`, and `top_k`.
+
+        subtype_results : dict
+            Dictionary of region-level subtype results.
+
+            Example:
+            {
+                "Invasive": RegionSubtypeResult(...),
+                "CIS": RegionSubtypeResult(...)
+            }
+
+            This dictionary is empty if `run_subtype=False`.
+
+        sample_names : list
+            Names of reference samples included in `ref_adata_dic`.
+
+        parameters : dict
+            Main pipeline parameters used for heterogeneity score inference,
+            region selection, subtype discovery, and output organization.
+
+    Notes
+    -----
+    This function assumes that preprocessing has already been completed before
+    running the pipeline. In particular, `ref_adata_dic` and `all_adata` should
+    usually be generated from the same processed gene-expression data, with
+    consistent genes and observation metadata.
+
+    This pipeline focuses only on gene-expression AnnData objects for
+    heterogeneity inference. Image features or multimodal features are not used
+    in this function.
+    """
+
+    os.makedirs(res_dir, exist_ok=True)
+
+    score_results = infer_heterogeneity_scores(
+        ref_adata_dic=ref_adata_dic,
+        all_adata=all_adata,
+        common_genes=common_genes,
+        tissue_region_list=tissue_region_list,
+        label_key=label_key,
+        sample_key=sample_key,
+        pvals_adj=pvals_adj,
+        min_in_out_group_ratio=min_in_out_group_ratio,
+        min_in_group_fraction=min_in_group_fraction,
+        min_fold_change=min_fold_change,
+        gene_num=region_gene_num,
+        n_perm=n_perm,
+        random_state=random_state,
+        one_sided=one_sided,
+        min_spots=min_region_spots,
+        print_results=print_results,
+    )
+
+    selected_regions, selected_region_scores = select_heterogeneous_regions(
+        hetero_summary=score_results["hetero_summary"],
+        method=selection_method,
+        score_key=score_key,
+        threshold=hetero_threshold,
+        top_k=top_k,
+        include_ties=True,
+        print_results=print_results,
+    )
+
+    subtype_results = {}
+
+    if run_subtype:
+        for target_region in selected_regions:
+            if print_results:
+                print("\n" + "=" * 70)
+                print(f"Subtype analysis for heterogeneous region: {target_region}")
+                print("=" * 70)
+
+            subtype_results[target_region] = infer_region_shared_subtypes(
+                ref_adata_dic=ref_adata_dic,
+                target_region=target_region,
+                res_dir=os.path.join(res_dir, "heterogeneous_region_subtypes"),
+                label_key=label_key,
+                min_region_spots=min_region_spots,
+                pcs_num=pcs_num,
+                section_cluster_method=section_cluster_method,
+                section_n_clusters=section_n_clusters,
+                leiden_res=leiden_res,
+                n_neighbors=n_neighbors,
+                shared_cluster_key=shared_cluster_key,
+                set_shared_clusters_num=set_shared_clusters_num,
+                overlap_cutoff=overlap_cutoff,
+                random_state=random_state,
+                pvals_adj=pvals_adj,
+                min_in_out_group_ratio=min_in_out_group_ratio,
+                min_in_group_fraction=min_in_group_fraction,
+                min_fold_change=min_fold_change,
+                section_gene_num=section_gene_num,
+                merged_gene_num=merged_gene_num,
+                individual_gene_num=individual_gene_num,
+                min_cluster_fraction=min_cluster_fraction,
+                cat_color=cat_color,
+                cnt_colormap=cnt_colormap,
+                x_key=x_key,
+                y_key=y_key,
+                fig_scale=fig_scale,
+                invert_x=invert_x,
+                invert_y=invert_y,
+                merged_key=merged_key,
+                print_results=print_results,
+            )
+
+    result = ReferenceHeterogeneityResult(
+        dataset_name=dataset_name,
+        hetero_summary=score_results["hetero_summary"],
+        sta_summary=score_results["sta_summary"],
+        perm_sil_summary=score_results["perm_sil_summary"],
+        selected_regions=selected_regions,
+        selected_region_scores=selected_region_scores,
+        selection_method=selection_method,
+        selection_params={
+            "score_key": score_key,
+            "hetero_threshold": hetero_threshold,
+            "top_k": top_k,
+        },
+        subtype_results=subtype_results,
+        sample_names=list(ref_adata_dic.keys()),
+        parameters={
+            "label_key": label_key,
+            "sample_key": sample_key,
+            "min_region_spots": min_region_spots,
+            "pvals_adj": pvals_adj,
+            "min_in_out_group_ratio": min_in_out_group_ratio,
+            "min_in_group_fraction": min_in_group_fraction,
+            "min_fold_change": min_fold_change,
+            "region_gene_num": region_gene_num,
+            "n_perm": n_perm,
+            "one_sided": one_sided,
+            "run_subtype": run_subtype,
+            "res_dir": res_dir,
+        },
+    )
+
+    return result
+
+
+#=======================================================================
+# Part 4. Annotate heterogeneity in query samples
+#=======================================================================
+
+
+
+
+
 
 
 
