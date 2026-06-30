@@ -373,7 +373,73 @@ print(selected_refs_dic)
 ```
 
 ### 8. Label transfer
+#### 8.1 Hierarchical feature selection
+```python
+gene_feature_results = select_hierarchical_genes_pipeline(
+    ref_adata_dic=ref_gene_dic,
+    hier_tree=inferred_tree,
+    anchor_scenario=anchor_scenario,
+    filtering_paras=gene_filtering_paras,
+    count_num=1,
+)
 
+image_feature_results = select_hierarchical_genes_pipeline(
+    ref_adata_dic=ref_image_dic, # need to be nonnegative 
+    hier_tree=inferred_tree,
+    anchor_scenario=anchor_scenario,
+    filtering_paras=image_filtering_paras,
+    count_num=1,
+)
 
+```
 
+#### 8.2 Determine clustering configurations
+```python
+config_result = determine_multi_modal_embedding_config(
+    included_modalities = included_modalities,
+    ref_section_list = ref_section_list,
+    ref_gene_dic = ref_gene_dic,
+    ref_image_dic = ref_image_dic,
+    features_dic = gene_feature_results.get_clustering_features(inferred_tree.root_node),
+    features_format = "section",
+    label_key = label_key,
+    hard_threshold = 0.3,
+    alpha = 0.8,
+    selection_criterion = "both",
+    n_pcs_dic = n_pcs_dic,
+    default_pcs_num = 30,
+    candidate_methods = ("pca", "selected_features"),
+	)
+
+selected_modalities = config_result.selected_modalities
+dim_reduction_method = config_result.dim_reduction_method
+print(selected_modalities)
+print(dim_reduction_method)
+
+clustering_config = config_result.to_clustering_config(
+	clustering_method = clustering_method,
+	resolution = resolution,
+	n_neighbors = n_neighbors,
+	)
+
+```
+#### 8.3 Hierarchical label transfer
+```python
+qry_nodes_dic = label_transfer(
+	ref_gene_sca_dic = ref_gene_sca_dic,
+	qry_adata_dic = qry_adata_dic,
+	hier_tree = tree,
+	hier_genes_dic = gene_feature_results,
+	hier_image_dic = image_feature_results,
+	output_dir = output_dir,
+	clustering_config = clustering_config,
+	knn = knn,
+	label_key = label_key,
+	cluster_key = cluster_key,
+	fig_paras = fig_paras,
+	)
+
+qry_adata = fit_labels(qry_adata, hier_tree, annotation_key, refined_key, novel_key, smooth_labels, fig_paras)
+
+```
 
